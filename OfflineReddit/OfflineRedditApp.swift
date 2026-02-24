@@ -1,11 +1,5 @@
-//
-//  OfflineRedditApp.swift
-//  OfflineReddit
-//
-//  Created by Vineet Manghani on 22/02/2026.
-//
-
 import SwiftUI
+import SwiftData
 
 @main
 struct OfflineRedditApp: App {
@@ -13,5 +7,7 @@ struct OfflineRedditApp: App {
         WindowGroup {
             ContentView()
         }
+        // NEW: Added SubredditSubscription.self to the database
+        .modelContainer(for: [SubredditSubscription.self, RedditPost.self, RedditComment.self])
     }
 }
