@@ -366,44 +366,76 @@ struct ContentView: View {
         else { recentlySyncedSubs = recent; smartSyncLimit = limit; showingSmartSyncAlert = true }
     }
     
-    private func runSingleSync(for subName: String, postLimit: Int) async {
-        cancelTokens.remove(subName)
-        currentPostLimit = postLimit
-        await syncSubreddit(name: subName, postLimit: postLimit, isMasterSync: false)
+    // MARK: - Background-Aware Sync Functions
         
-        if !cancelTokens.contains(subName) { subProgressMap[subName] = "Up to date!" }
-        try? await Task.sleep(nanoseconds: 2_000_000_000)
-        withAnimation { subProgressMap[subName] = nil }
-        cancelTokens.remove(subName)
-    }
-    
-    private func runMasterSync(postLimit: Int, skipList: [String]) async {
-        let subsToSync = subscriptions.filter { !skipList.contains($0.name) }
-        if subsToSync.isEmpty { return }
-        
-        cancelTokens.removeAll()
-        withAnimation { isRefreshingAll = true }
-        refreshCurrentStep = 0
-        refreshTotalSteps = Double(subsToSync.count) * Double(1 + postLimit)
-        updateTimeRemaining()
-        
-        for sub in subsToSync { subProgressMap[sub.name] = "Waiting in queue..." }
-        for sub in subsToSync {
-            if cancelTokens.contains("MASTER") { break }
-            if cancelTokens.contains(sub.name) { continue }
+        private func runSingleSync(for subName: String, postLimit: Int) async {
+            // 1. Ask iOS for a background "hall pass"
+            var bgTask: UIBackgroundTaskIdentifier = .invalid
+            bgTask = UIApplication.shared.beginBackgroundTask(withName: "SingleSync_\(subName)") {
+                // This block runs if we run out of time and iOS is about to kill the task
+                cancelTokens.insert(subName)
+                UIApplication.shared.endBackgroundTask(bgTask)
+                bgTask = .invalid
+            }
             
-            await syncSubreddit(name: sub.name, postLimit: postLimit, isMasterSync: true)
-            if !cancelTokens.contains(sub.name) && !cancelTokens.contains("MASTER") { subProgressMap[sub.name] = "Up to date!" }
+            cancelTokens.remove(subName)
+            currentPostLimit = postLimit
+            await syncSubreddit(name: subName, postLimit: postLimit, isMasterSync: false)
+            
+            if !cancelTokens.contains(subName) { subProgressMap[subName] = "Up to date!" }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            withAnimation { subProgressMap[subName] = nil }
+            cancelTokens.remove(subName)
+            
+            // 2. Tell iOS we are finished so it can put the app to sleep safely
+            if bgTask != .invalid {
+                UIApplication.shared.endBackgroundTask(bgTask)
+                bgTask = .invalid
+            }
         }
         
-        withAnimation { isRefreshingAll = false }
-        refreshProgressText = ""
-        try? await Task.sleep(nanoseconds: 2_000_000_000)
-        withAnimation {
-            subProgressMap.removeAll()
+        private func runMasterSync(postLimit: Int, skipList: [String]) async {
+            let subsToSync = subscriptions.filter { !skipList.contains($0.name) }
+            if subsToSync.isEmpty { return }
+            
+            // 1. Ask iOS for a background "hall pass"
+            var bgTask: UIBackgroundTaskIdentifier = .invalid
+            bgTask = UIApplication.shared.beginBackgroundTask(withName: "MasterSync") {
+                // If iOS forces us to stop, cancel everything gracefully
+                cancelTokens.insert("MASTER")
+                UIApplication.shared.endBackgroundTask(bgTask)
+                bgTask = .invalid
+            }
+            
             cancelTokens.removeAll()
+            withAnimation { isRefreshingAll = true }
+            refreshCurrentStep = 0
+            refreshTotalSteps = Double(subsToSync.count) * Double(1 + postLimit)
+            updateTimeRemaining()
+            
+            for sub in subsToSync { subProgressMap[sub.name] = "Waiting in queue..." }
+            for sub in subsToSync {
+                if cancelTokens.contains("MASTER") { break }
+                if cancelTokens.contains(sub.name) { continue }
+                
+                await syncSubreddit(name: sub.name, postLimit: postLimit, isMasterSync: true)
+                if !cancelTokens.contains(sub.name) && !cancelTokens.contains("MASTER") { subProgressMap[sub.name] = "Up to date!" }
+            }
+            
+            withAnimation { isRefreshingAll = false }
+            refreshProgressText = ""
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            withAnimation {
+                subProgressMap.removeAll()
+                cancelTokens.removeAll()
+            }
+            
+            // 2. Return the hall pass to the operating system
+            if bgTask != .invalid {
+                UIApplication.shared.endBackgroundTask(bgTask)
+                bgTask = .invalid
+            }
         }
-    }
     
     private func syncSubreddit(name: String, postLimit: Int, isMasterSync: Bool) async {
         activeSyncs.insert(name)
